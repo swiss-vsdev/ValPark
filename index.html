@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parking PoC — Explication &amp; Pinouts</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --ink: #0d0d0d;
+    --muted: #5b6472;
+    --line: #e5e5e5;
+    --accent: #4d6bfe;
+    --accent-soft: #eef2ff;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --ok: #15803d;
+    --ok-soft: #dcfce7;
+    --uart: #0891b2;
+    --i2c: #7c3aed;
+    --pwr: #dc2626;
+    --gnd: #374151;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+  header.hero { padding: 8px 0 28px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+  .kicker { color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
+  h1 { font-size: 34px; line-height: 1.15; margin: 10px 0 12px; font-weight: 700; letter-spacing: -0.02em; }
+  .sub { color: var(--muted); font-size: 16px; max-width: 760px; }
+  h2 { font-size: 22px; margin: 48px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); font-weight: 700; }
+  h3 { font-size: 16px; margin: 24px 0 8px; font-weight: 700; }
+  p { margin: 8px 0 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; background: #fafbfc; }
+  tr:last-child td { border-bottom: none; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  code.inline { background: var(--accent-soft); color: #26327a; padding: 1px 6px; border-radius: 5px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pin { display: inline-flex; align-items: center; justify-content: center; min-width: 42px;
+    padding: 3px 9px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 12.5px;
+    font-weight: 600; background: var(--accent-soft); color: #26327a; }
+  .pin.vcc { background: #fee2e2; color: var(--pwr); }
+  .pin.gnd { background: #e5e7eb; color: #111827; }
+  .pin.io  { background: #dbeafe; color: #1e40af; }
+  .pin.adc { background: #fef3c7; color: #92400e; }
+  .diagram { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 22px; overflow-x: auto; }
+  svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  ol.steps { counter-reset: s; list-style: none; padding: 0; margin: 8px 0 0; }
+  ol.steps > li { counter-increment: s; position: relative; padding: 14px 16px 14px 56px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; }
+  ol.steps > li::before { content: counter(s); position: absolute; left: 14px; top: 14px;
+    width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; }
+  ol.steps > li strong { display: block; margin-bottom: 2px; }
+  ol.steps > li .desc { color: var(--muted); font-size: 14px; }
+  .payload { font-family: ui-monospace, monospace; font-size: 13px; }
+  .byte { display: inline-block; padding: 4px 8px; margin: 2px; border-radius: 6px; font-weight: 700; }
+  .byte.b0 { background: #dbeafe; color: #1e40af; }
+  .byte.b1 { background: #dcfce7; color: #166534; }
+  .byte.b2 { background: #fef3c7; color: #92400e; }
+  .byte.b3 { background: #fce7f3; color: #9d174d; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); margin-top: 14px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  .note { background: var(--warn-soft); border-left: 3px solid var(--warn); padding: 12px 14px; border-radius: 6px; font-size: 14px; color: #78350f; }
+  .note.ok { background: var(--ok-soft); border-left-color: var(--ok); color: #14532d; }
+  .disc-rule td:first-child { white-space: nowrap; font-family: ui-monospace, monospace; font-size: 13px; }
+  pre.arch { margin: 0; overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="kicker">Proof of Concept</div>
+    <h1>Parking PoC — Détection, GPS, LoRaWAN &amp; disque bleu</h1>
+    <p class="sub">
+      Un LilyGo T3-S3 E-Paper détecte l'arrêt d'une voiture (15&nbsp;s), vérifie par GPS si elle
+      est en zone de parc, envoie la position par LoRaWAN (TTN) à un serveur Python, puis affiche
+      l'heure du disque bleu selon la règle suisse.
+    </p>
+  </header>
+
+  <h2>1. Architecture</h2>
+  <div class="card">
+<pre class="mono arch">
+  ┌──────────────┐   I2C    ┌──────────────┐   UART   ┌──────────────┐
+  │  MPU6050     │ &lt;──────&gt; │  LilyGo      │ &lt;──────&gt; │  Gravity     │
+  │  accéléromètre│          │  T3-S3       │          │  GNSS        │
+  │  (réveil INT)│          │  ESP32-S3    │          │  (alim.      │
+  └──────────────┘          │              │          │   commutée)  │
+                            │  + E-Paper   │          └──────────────┘
+                            │  + SX1262    │
+                            └──────┬───────┘
+                                   │ LoRaWAN (EU868)
+                                   ▼
+                            ┌──────────────┐   HTTPS   ┌──────────────┐
+                            │  TTN Gateway │ ────────► │  Serveur     │
+                            │  (The Things │  webhook  │  Python      │
+                            │   Stack)     │  /ttn     │  + SQLite    │
+                            └──────────────┘           └──────────────┘
+</pre>
+  </div>
+
+  <h2>2. Composants</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Composant</th><th>Rôle dans le montage</th></tr></thead>
+      <tbody>
+        <tr><td><strong>LilyGo T3S3 E-Paper 868 MHz SX1262</strong></td><td>Carte principale : ESP32-S3, écran e-paper 2,13", radio LoRa SX1262</td></tr>
+        <tr><td><strong>Module Gravity GNSS</strong> + antenne active IPEX</td><td>Position et heure UTC (fix à froid ~30 s)</td></tr>
+        <tr><td><strong>MPU6050 GY-521</strong></td><td>Détection de mouvement / arrêt + réveil par interruption</td></tr>
+        <tr><td><strong>Cellule 18650</strong> protégée + connecteur</td><td>Alimentation autonome (connecteur JST de la carte)</td></tr>
+        <tr><td><strong>MOSFET P AO3401</strong></td><td>Commutation de l'alimentation du GPS (économie d'énergie)</td></tr>
+        <tr><td><strong>Résistance 100 kΩ</strong></td><td>Pull-up de grille du MOSFET (GPS OFF par défaut)</td></tr>
+        <tr><td><strong>Câble Gravity 4 broches</strong> (fourni) + fils Dupont, câble USB-C</td><td>Câblage et programmation</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>3. Pinouts de la carte T3-S3 E-Paper</h2>
+  <p class="sub">Documentation officielle LilyGo. Ces broches sont fixes et câblées en interne.</p>
+  <div class="grid2">
+    <div class="card">
+      <h3>E-Paper</h3>
+      <table>
+        <thead><tr><th>Fonction</th><th>GPIO</th></tr></thead>
+        <tbody>
+          <tr><td>BUSY</td><td><span class="pin io">48</span></td></tr>
+          <tr><td>RST</td><td><span class="pin io">47</span></td></tr>
+          <tr><td>DC</td><td><span class="pin io">16</span></td></tr>
+          <tr><td>CS</td><td><span class="pin io">15</span></td></tr>
+          <tr><td>CLK</td><td><span class="pin io">14</span></td></tr>
+          <tr><td>MOSI</td><td><span class="pin io">11</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>LoRa SX1262</h3>
+      <table>
+        <thead><tr><th>Fonction</th><th>GPIO</th></tr></thead>
+        <tbody>
+          <tr><td>SCLK</td><td><span class="pin io">5</span></td></tr>
+          <tr><td>MISO</td><td><span class="pin io">3</span></td></tr>
+          <tr><td>MOSI</td><td><span class="pin io">6</span></td></tr>
+          <tr><td>CS</td><td><span class="pin io">7</span></td></tr>
+          <tr><td>DIO1</td><td><span class="pin io">33</span></td></tr>
+          <tr><td>BUSY</td><td><span class="pin io">34</span></td></tr>
+          <tr><td>RST</td><td><span class="pin io">8</span></td></tr>
+          <tr><td>POW</td><td><span class="pin io">35</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Carte SD</h3>
+      <table>
+        <thead><tr><th>Fonction</th><th>GPIO</th></tr></thead>
+        <tbody>
+          <tr><td>MISO</td><td><span class="pin io">2</span></td></tr>
+          <tr><td>CS</td><td><span class="pin io">13</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Divers</h3>
+      <table>
+        <thead><tr><th>Fonction</th><th>GPIO</th></tr></thead>
+        <tbody>
+          <tr><td>LED</td><td><span class="pin io">37</span></td></tr>
+          <tr><td>ADC batterie</td><td><span class="pin adc">1</span></td></tr>
+          <tr><td>Bouton BOOT</td><td><span class="pin io">0</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2>4. Câblage des périphériques externes</h2>
+  <p class="sub">
+    Le module GPS est un <strong>Gravity GNSS</strong> : libellés de broches <code class="inline">+</code>,
+    <code class="inline">D/T</code>, <code class="inline">C/R</code>, <code class="inline">GND</code> et
+    interrupteur de mode à positionner sur <strong>UART</strong>.
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 900 820" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Schéma de câblage">
+      <defs>
+        <style>
+          .board     { fill: #ffffff; stroke: #4d6bfe; stroke-width: 2; }
+          .module    { fill: #ffffff; stroke: #d1d5db; stroke-width: 1.5; }
+          .b-title   { font: 700 15px -apple-system, sans-serif; fill: #0d0d0d; }
+          .b-sub     { font: 500 12px -apple-system, sans-serif; fill: #5b6472; }
+          .b-tiny    { font: 500 10px ui-monospace, monospace; fill: #9ca3af; }
+          .m-title   { font: 700 14px -apple-system, sans-serif; fill: #0d0d0d; }
+          .m-sub     { font: 500 10px ui-monospace, monospace; fill: #9ca3af; }
+          .p-label   { font: 600 11px ui-monospace, monospace; fill: #26327a; }
+          .m-label   { font: 700 11px ui-monospace, monospace; fill: #374151; }
+          .w-label   { font: 500 10px ui-monospace, monospace; fill: #6b7280; }
+          .pin-dot   { fill: #4d6bfe; }
+          .pin-dot-m { fill: #9ca3af; }
+          .wire-uart { stroke: #0891b2; stroke-width: 2.2; fill: none; }
+          .wire-i2c  { stroke: #7c3aed; stroke-width: 2.2; fill: none; }
+          .wire-gpio { stroke: #4d6bfe; stroke-width: 2.2; fill: none; }
+          .wire-pwr  { stroke: #dc2626; stroke-width: 2.2; fill: none; }
+          .wire-gnd  { stroke: #374151; stroke-width: 2.2; fill: none; }
+          .gnd-line  { stroke: #374151; stroke-width: 2; }
+          .res-body  { fill: #ffffff; stroke: #4d6bfe; stroke-width: 1.8; }
+          .sw-pill   { fill: #eef2ff; stroke: #4d6bfe; stroke-width: 1; }
+          .sw-text   { font: 700 9px ui-monospace, monospace; fill: #26327a; letter-spacing: .05em; }
+        </style>
+      </defs>
+
+      <!-- BOARD -->
+      <rect class="board" x="80" y="100" width="220" height="580" rx="14"/>
+      <text class="b-title" x="190" y="132" text-anchor="middle">LilyGo T3-S3</text>
+      <text class="b-sub"   x="190" y="152" text-anchor="middle">ESP32-S3</text>
+      <text class="b-tiny"  x="190" y="178" text-anchor="middle">E-Paper 2.13" · LoRa SX1262</text>
+
+      <!-- Board pins -->
+      <circle class="pin-dot" cx="300" cy="170" r="3.5"/>
+      <text class="p-label" x="290" y="174" text-anchor="end">GPIO 44</text>
+      <circle class="pin-dot" cx="300" cy="200" r="3.5"/>
+      <text class="p-label" x="290" y="204" text-anchor="end">GPIO 43</text>
+      <circle class="pin-dot" cx="300" cy="350" r="3.5"/>
+      <text class="p-label" x="290" y="354" text-anchor="end">GPIO 12</text>
+      <circle class="pin-dot" cx="300" cy="400" r="3.5"/>
+      <text class="p-label" x="290" y="404" text-anchor="end">3V3</text>
+      <circle class="pin-dot" cx="300" cy="535" r="3.5"/>
+      <text class="p-label" x="290" y="539" text-anchor="end">GPIO 10</text>
+      <circle class="pin-dot" cx="300" cy="565" r="3.5"/>
+      <text class="p-label" x="290" y="569" text-anchor="end">GPIO 21</text>
+      <circle class="pin-dot" cx="300" cy="595" r="3.5"/>
+      <text class="p-label" x="290" y="599" text-anchor="end">GPIO 4</text>
+      <circle class="pin-dot" cx="300" cy="640" r="3.5"/>
+      <text class="p-label" x="290" y="644" text-anchor="end">GND</text>
+
+      <!-- GRAVITY GNSS -->
+      <rect class="module" x="430" y="130" width="200" height="160" rx="10"/>
+      <text class="m-title" x="530" y="158" text-anchor="middle">Gravity GNSS</text>
+      <text class="m-sub"   x="530" y="174" text-anchor="middle">UART 9600 · antenne IPEX</text>
+
+      <!-- Mode switch pill -->
+      <rect class="sw-pill" x="478" y="185" width="104" height="18" rx="9"/>
+      <text class="sw-text" x="530" y="198" text-anchor="middle">SWITCH → UART</text>
+
+      <!-- Gravity pins -->
+      <circle class="pin-dot-m" cx="430" cy="225" r="3.5"/>
+      <text class="m-label" x="440" y="229">D/T</text>
+      <text class="w-label" x="470" y="229">(TX sortie)</text>
+      <circle class="pin-dot-m" cx="430" cy="255" r="3.5"/>
+      <text class="m-label" x="440" y="259">C/R</text>
+      <text class="w-label" x="470" y="259">(RX entrée)</text>
+      <circle class="pin-dot-m" cx="530" cy="290" r="3.5"/>
+      <text class="m-label" x="530" y="282" text-anchor="middle">+</text>
+
+      <!-- MOSFET -->
+      <rect class="module" x="430" y="330" width="200" height="120" rx="10"/>
+      <text class="m-title" x="530" y="358" text-anchor="middle">MOSFET P</text>
+      <text class="m-sub"   x="530" y="374" text-anchor="middle">AO3401 · power gate</text>
+
+      <circle class="pin-dot-m" cx="430" cy="350" r="3.5"/>
+      <text class="m-label" x="440" y="354">G</text>
+      <circle class="pin-dot-m" cx="430" cy="400" r="3.5"/>
+      <text class="m-label" x="440" y="404">S</text>
+      <circle class="pin-dot-m" cx="530" cy="330" r="3.5"/>
+      <text class="m-label" x="530" y="322" text-anchor="middle">D</text>
+
+      <!-- MPU6050 -->
+      <rect class="module" x="430" y="500" width="200" height="150" rx="10"/>
+      <text class="m-title" x="530" y="528" text-anchor="middle">MPU6050</text>
+      <text class="m-sub"   x="530" y="544" text-anchor="middle">accéléro + gyro · I2C</text>
+
+      <circle class="pin-dot-m" cx="430" cy="535" r="3.5"/>
+      <text class="m-label" x="440" y="539">SDA</text>
+      <circle class="pin-dot-m" cx="430" cy="565" r="3.5"/>
+      <text class="m-label" x="440" y="569">SCL</text>
+      <circle class="pin-dot-m" cx="430" cy="595" r="3.5"/>
+      <text class="m-label" x="440" y="599">INT</text>
+      <circle class="pin-dot-m" cx="430" cy="625" r="3.5"/>
+      <text class="m-label" x="440" y="629">GND</text>
+      <circle class="pin-dot-m" cx="530" cy="650" r="3.5"/>
+      <text class="m-label" x="530" y="642" text-anchor="middle">VCC</text>
+
+      <!-- Battery -->
+      <rect class="module" x="430" y="700" width="200" height="60" rx="10"/>
+      <text class="m-title" x="530" y="726" text-anchor="middle" style="font-size:13px;">18650</text>
+      <text class="m-sub"   x="530" y="742" text-anchor="middle">→ JST carte</text>
+
+      <!-- WIRES -->
+      <!-- UART: D/T -> GPIO 44, C/R -> GPIO 43 -->
+      <line class="wire-uart" x1="300" y1="170" x2="430" y2="225"/>
+      <line class="wire-uart" x1="300" y1="200" x2="430" y2="255"/>
+      <text class="w-label" x="360" y="205" text-anchor="middle">UART 9600</text>
+
+      <!-- GPIO gate -->
+      <line class="wire-gpio" x1="300" y1="350" x2="430" y2="350"/>
+      <text class="w-label" x="365" y="342" text-anchor="middle">gate</text>
+
+      <!-- 3V3 to source -->
+      <line class="wire-pwr" x1="300" y1="400" x2="430" y2="400"/>
+      <text class="w-label" x="365" y="420" text-anchor="middle">3V3</text>
+
+      <!-- I2C -->
+      <line class="wire-i2c" x1="300" y1="535" x2="430" y2="535"/>
+      <line class="wire-i2c" x1="300" y1="565" x2="430" y2="565"/>
+      <text class="w-label" x="365" y="527" text-anchor="middle">I2C 400 kHz</text>
+
+      <!-- INT -->
+      <line class="wire-gpio" x1="300" y1="595" x2="430" y2="595"/>
+      <text class="w-label" x="365" y="587" text-anchor="middle">INT</text>
+
+      <!-- Pull-up resistor between gate and 3V3 -->
+      <line class="wire-gpio" x1="390" y1="350" x2="390" y2="362"/>
+      <rect class="res-body" x="383" y="362" width="14" height="26" rx="2"/>
+      <line class="wire-pwr" x1="390" y1="388" x2="390" y2="400"/>
+      <text class="w-label" x="402" y="380">100k</text>
+
+      <!-- Gravity '+' to MOSFET Drain -->
+      <line class="wire-pwr" x1="530" y1="290" x2="530" y2="330"/>
+      <text class="w-label" x="546" y="314">VCC commuté</text>
+
+      <!-- Gravity GND symbol (below module) -->
+      <line class="wire-gnd" x1="470" y1="290" x2="470" y2="308"/>
+      <line class="gnd-line" x1="455" y1="308" x2="485" y2="308"/>
+      <line class="gnd-line" x1="460" y1="314" x2="480" y2="314"/>
+      <line class="gnd-line" x1="465" y1="320" x2="475" y2="320"/>
+      <text class="m-label" x="500" y="308" style="font-size:10px; fill:#5b6472;">GND</text>
+
+      <!-- MPU GND symbol -->
+      <line class="wire-gnd" x1="430" y1="625" x2="465" y2="625"/>
+      <line class="wire-gnd" x1="465" y1="625" x2="465" y2="645"/>
+      <line class="gnd-line" x1="450" y1="645" x2="480" y2="645"/>
+      <line class="gnd-line" x1="455" y1="651" x2="475" y2="651"/>
+      <line class="gnd-line" x1="460" y1="657" x2="470" y2="657"/>
+
+      <!-- Board GND symbol -->
+      <line class="wire-gnd" x1="300" y1="640" x2="340" y2="640"/>
+      <line class="wire-gnd" x1="340" y1="640" x2="340" y2="660"/>
+      <line class="gnd-line" x1="325" y1="660" x2="355" y2="660"/>
+      <line class="gnd-line" x1="330" y1="666" x2="350" y2="666"/>
+      <line class="gnd-line" x1="335" y1="672" x2="345" y2="672"/>
+
+      <!-- MPU VCC +3V3 -->
+      <line class="wire-pwr" x1="530" y1="650" x2="530" y2="675"/>
+      <line class="wire-pwr" x1="522" y1="675" x2="538" y2="675"/>
+      <text class="w-label" x="530" y="692" text-anchor="middle">+3V3</text>
+
+      <!-- Battery to board -->
+      <line class="wire-pwr" x1="430" y1="730" x2="200" y2="730"/>
+      <line class="wire-pwr" x1="200" y1="730" x2="200" y2="680"/>
+
+      <!-- LEGEND -->
+      <g transform="translate(660,100)">
+        <rect x="0" y="0" width="230" height="180" rx="10" fill="#ffffff" stroke="#e5e5e5" stroke-width="1"/>
+        <text x="12" y="22" style="font:700 12px -apple-system,sans-serif; fill:#0d0d0d;">Légende</text>
+        <line x1="12" y1="42" x2="42" y2="42" class="wire-uart"/>
+        <text x="50" y="46" class="w-label" style="font-size:11px;">UART (GPS)</text>
+        <line x1="12" y1="64" x2="42" y2="64" class="wire-i2c"/>
+        <text x="50" y="68" class="w-label" style="font-size:11px;">I2C (MPU6050)</text>
+        <line x1="12" y1="86" x2="42" y2="86" class="wire-gpio"/>
+        <text x="50" y="90" class="w-label" style="font-size:11px;">GPIO / signal</text>
+        <line x1="12" y1="108" x2="42" y2="108" class="wire-pwr"/>
+        <text x="50" y="112" class="w-label" style="font-size:11px;">3,3 V</text>
+        <line x1="12" y1="130" x2="42" y2="130" class="wire-gnd"/>
+        <text x="50" y="134" class="w-label" style="font-size:11px;">GND</text>
+        <rect x="12" y="150" width="30" height="14" rx="7" class="sw-pill"/>
+        <text x="50" y="161" class="w-label" style="font-size:11px;">switch UART/I2C</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 style="margin-top:24px;">Tableau de câblage</h3>
+  <div class="card">
+    <table>
+      <thead><tr><th>Module</th><th>Broche module</th><th>Vers la carte</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="4">Gravity GNSS</td><td><code class="inline">D/T</code> (TX sortie)</td><td><span class="pin io">GPIO 44</span> — si rien ne sort, inverser avec GPIO 43</td></tr>
+        <tr><td><code class="inline">C/R</code> (RX entrée)</td><td><span class="pin io">GPIO 43</span></td></tr>
+        <tr><td><code class="inline">+</code> (VCC, 3,3–5,5 V)</td><td>Drain du MOSFET (3,3 V commuté)</td></tr>
+        <tr><td><code class="inline">GND</code></td><td><span class="pin gnd">GND</span></td></tr>
+        <tr><td rowspan="5">MPU6050</td><td>SDA</td><td><span class="pin io">GPIO 10</span></td></tr>
+        <tr><td>SCL</td><td><span class="pin io">GPIO 21</span></td></tr>
+        <tr><td>INT</td><td><span class="pin io">GPIO 4</span> (broche RTC 0–21, obligatoire pour le réveil deep sleep)</td></tr>
+        <tr><td>VCC</td><td><span class="pin vcc">3V3</span></td></tr>
+        <tr><td>GND / AD0</td><td><span class="pin gnd">GND</span> / <span class="pin gnd">GND</span></td></tr>
+        <tr><td rowspan="3">MOSFET AO3401</td><td>Source</td><td><span class="pin vcc">3V3</span></td></tr>
+        <tr><td>Grille</td><td><span class="pin io">GPIO 12</span> + 100 kΩ vers 3V3 (GPIO bas = GPS ON)</td></tr>
+        <tr><td>Drain</td><td><code class="inline">+</code> du Gravity GNSS</td></tr>
+        <tr><td>Batterie 18650</td><td>+ / −</td><td>Connecteur JST de la carte (vérifier la polarité)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note" style="margin-top:14px;">
+    <strong>Deux points à vérifier sur le Gravity GNSS :</strong>
+    <ul style="margin:6px 0 0 18px; padding:0;">
+      <li><strong>Inversion TX/RX</strong> — je n'ai pas pu confirmer l'orientation des libellés
+        <code class="inline">D/T</code> et <code class="inline">C/R</code>. Si le GPS n'envoie rien
+        (aucun fix après 90 s), <strong>inverse GPIO 43 et 44</strong> dans <code class="inline">config.h</code>.</li>
+      <li><strong>Câble fourni</strong> — c'est un câble Gravity 4 broches. Vérifie le connecteur côté carte :
+        s'il ne se branche pas sur des broches Dupont, utilise tes fils F-F pour relier les 4 broches.</li>
+    </ul>
+  </div>
+
+  <h2>5. Règle du disque bleu (Suisse)</h2>
+  <p>Flèche sur le trait qui suit l'heure d'arrivée (demi-heure strictement suivante).</p>
+  <div class="card">
+    <table class="disc-rule">
+      <thead><tr><th>Arrivée (lun–sam)</th><th>Disque</th><th>Départ au plus tard</th></tr></thead>
+      <tbody>
+        <tr><td>08h00–11h29 et 13h30–17h59</td><td>Demi-heure suivante</td><td>Disque + 1 h</td></tr>
+        <tr><td>11h30–13h29</td><td>Demi-heure suivante</td><td>14h30</td></tr>
+        <tr><td>18h00–18h59</td><td>Demi-heure suivante</td><td>09h00 le lendemain</td></tr>
+        <tr><td>19h00–07h59</td><td>Pas de disque</td><td>Avant 08h00</td></tr>
+        <tr><td>Dimanche</td><td>Pas de disque</td><td>– (jours fériés non gérés)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>6. Format du paquet LoRaWAN (11 octets)</h2>
+  <div class="card">
+    <div class="payload">
+      <span class="byte b0">01</span>
+      <span class="byte b1">00 46 8b cf</span>
+      <span class="byte b2">00 0b 3b 3b</span>
+      <span class="byte b3">1f</span>
+      <span class="byte b3">21</span>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="background:#dbeafe"></span> octet 0 — état (1 = garé, 0 = départ)</span>
+      <span><span class="swatch" style="background:#dcfce7"></span> octets 1–4 — latitude × 1e5, int32 BE</span>
+      <span><span class="swatch" style="background:#fef3c7"></span> octets 5–8 — longitude × 1e5, int32 BE</span>
+      <span><span class="swatch" style="background:#fce7f3"></span> octet 9 — disque (minutes / 30) ou 0xFF</span>
+      <span><span class="swatch" style="background:#fce7f3"></span> octet 10 — départ max (+0x80 si lendemain) ou 0xFF</span>
+    </div>
+    <p class="sub" style="margin-top:14px;">
+      Exemple : garé à 46,23311 / 7,36059, disque <strong>15:30</strong>, départ max <strong>16:30</strong>.
+    </p>
+  </div>
+
+  <h2>7. Mise en route</h2>
+  <ol class="steps">
+    <li>
+      <strong>ESP32</strong>
+      <div class="desc">Remplir <code class="inline">JOIN_EUI</code>, <code class="inline">DEV_EUI</code>,
+        <code class="inline">APP_KEY</code>, <code class="inline">NWK_KEY</code> dans
+        <code class="inline">src/config.h</code>, puis <code class="inline">pio run -t upload</code>.
+        Pour tester n'importe où, garder <code class="inline">DEBUG_ANY_POSITION_IS_ZONE 1</code> ;
+        ensuite le mettre à 0 et remplir <code class="inline">ZONES[]</code>.</div>
+    </li>
+    <li>
+      <strong>TTN</strong>
+      <div class="desc">Créer l'application et le device (OTAA, EU868). Activer l'option
+        « reset join nonces » (le firmware refait un join à chaque envoi, sans mémoriser le DevNonce).</div>
+    </li>
+    <li>
+      <strong>Webhook TTN</strong>
+      <div class="desc">Integrations → Webhooks → Custom, URL HTTPS publique, chemin uplink
+        <code class="inline">/ttn</code>, header <code class="inline">X-Webhook-Token</code> = valeur de
+        <code class="inline">TTN_WEBHOOK_TOKEN</code>.</div>
+    </li>
+    <li>
+      <strong>Serveur</strong>
+      <div class="desc"><code class="inline">TTN_WEBHOOK_TOKEN=monsecret python3 server.py</code>.
+        Exposer en HTTPS (ngrok, Cloudflare Tunnel…). Brancher le vrai processus dans
+        <code class="inline">start_parking_process()</code> / <code class="inline">end_parking_process()</code>.</div>
+    </li>
+    <li>
+      <strong>Premier test</strong>
+      <div class="desc">Interrupteur du Gravity GNSS sur <strong>UART</strong>, antenne IPEX branchée.
+        À portée d'une gateway TTN, antenne 868 MHz branchée avant toute émission.
+        Si le LoRa ne répond pas, tester <code class="inline">PIN_RADIO_POW</code>
+        (GPIO 35, mis à HIGH par le code, rôle non vérifié).</div>
+    </li>
+  </ol>
+
+  <h2>8. Vérifications effectuées</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Partie</th><th>Test</th><th>Résultat</th></tr></thead>
+      <tbody>
+        <tr><td>Serveur Python</td><td>Compilation, décodage, token (401), payload invalide (400), cycle garé → départ</td><td><span class="pill ok">OK</span></td></tr>
+        <tr><td>Calcul du disque</td><td>11 cas (arrondi, midi, 18h, nuit, dimanche)</td><td><span class="pill ok">OK</span></td></tr>
+        <tr><td>Heure GPS → époque, encodage payload</td><td>Comparé à Python</td><td><span class="pill ok">OK</span></td></tr>
+        <tr><td>Firmware ESP32</td><td>Compilation g++ avec stubs (Arduino, RadioLib, GxEPD2, TinyGPSPlus)</td><td><span class="pill ok">OK</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note" style="margin-top:14px;">
+    <strong>Limite :</strong> le firmware n'a pas été compilé avec la vraie toolchain ESP32.
+    Si <code class="inline">pio run</code> échoue, l'erreur viendra probablement de
+    <code class="inline">sendReceive(...)</code> (RadioLib 7.x),
+    <code class="inline">setDio2AsRfSwitch</code> ou <code class="inline">GxEPD2_213_BN</code>.
+  </div>
+
+  <footer>
+    Parking PoC — LilyGo T3-S3 E-Paper + Gravity GNSS + MPU6050 + TTN — 2026
+  </footer>
+</div>
+</body>
+</html>
