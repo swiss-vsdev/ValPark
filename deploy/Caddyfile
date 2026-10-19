@@ -1,0 +1,9 @@
+__DOMAIN__ {
+    @api path /health /api/register /api/event
+    handle @api {
+        reverse_proxy 127.0.0.1:8080
+    }
+    handle {
+        respond "Not found" 404
+    }
+}

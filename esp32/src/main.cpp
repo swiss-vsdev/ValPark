@@ -1,272 +1,157 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 #include <Wire.h>
 #include <SPI.h>
+#include <GxEPD2_3C.h>
+#include <Fonts/FreeMonoBold18pt7b.h>
 #include <time.h>
 #include <esp_sleep.h>
-#include <RadioLib.h>
-#include <GxEPD2_BW.h>
-#include <Fonts/FreeMonoBold24pt7b.h>
-#include <Fonts/FreeMonoBold12pt7b.h>
-#include <Fonts/FreeMono9pt7b.h>
-#include <TinyGPSPlus.h>
+#include <esp_system.h>
+#include <driver/gpio.h>
 #include "config.h"
-#include "parking_logic.h"
+#include "logic.h"
+#include "zones.h"
+#include "modem.h"
 
-// ---------- Peripheriques ----------
-SPIClass epdSPI(FSPI);
-SPIClass radioSPI(HSPI);
-GxEPD2_BW<GxEPD2_213_BN, GxEPD2_213_BN::HEIGHT> display(
-    GxEPD2_213_BN(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY));
-SX1262 radio = new Module(PIN_RADIO_CS, PIN_RADIO_DIO1, PIN_RADIO_RST, PIN_RADIO_BUSY, radioSPI);
-LoRaWANNode node(&radio, &EU868);
-TinyGPSPlus gps;
-
-// ---------- Etat conserve en deep sleep ----------
-enum State : uint8_t { MOVING = 0, PARKED = 1 };
-RTC_DATA_ATTR uint8_t rtcState = MOVING;
-RTC_DATA_ATTR double  rtcLat = 0, rtcLon = 0;
-
-// ---------- MPU6050 (registres bruts, sans librairie) ----------
-#define MPU_ADDR 0x68
-static void mpuWrite(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(MPU_ADDR); Wire.write(reg); Wire.write(val); Wire.endTransmission();
+GxEPD2_3C<GxEPD2_290c,GxEPD2_290c::HEIGHT> screen(GxEPD2_290c(EPD_CS,EPD_DC,EPD_RST,EPD_BUSY));
+Preferences prefs; Cellular modem; WebServer web(80);DNSServer dns;
+String deviceId,apPassword,csrf;
+bool registered=false,setupMode=false;
+uint32_t portalStarted=0;
+RTC_DATA_ATTR bool parked=false;
+RTC_DATA_ATTR double lastLat=0,lastLon=0;
+RTC_DATA_ATTR int savedLed=0;
+RTC_DATA_ATTR bool pending=false;
+RTC_DATA_ATTR char pendingBody[640]={0};
+// LED RGB : 0 eteinte, 1 verte, 2 rouge, 3 orange. Cathode commune a GND.
+void led(int mode){savedLed=mode;digitalWrite(LED_R,mode==2||mode==3);digitalWrite(LED_G,mode==1||mode==3);digitalWrite(LED_B,LOW);}
+void text(const String& a,const String& b="",const String& c="",const String& d="") {
+ screen.setRotation(1);screen.setFullWindow();screen.firstPage();
+ do{screen.fillScreen(GxEPD_WHITE);screen.setTextColor(GxEPD_BLACK);screen.setFont(nullptr);
+ screen.setTextSize(2);screen.setCursor(5,12);screen.println(a);screen.println(b);screen.println(c);screen.println(d);
+ }while(screen.nextPage());screen.hibernate();
 }
-static uint8_t mpuRead8(uint8_t reg) {
-  Wire.beginTransmission(MPU_ADDR); Wire.write(reg); Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)1);
-  return Wire.available() ? Wire.read() : 0;
+void regWrite(uint8_t r,uint8_t value){Wire.beginTransmission(0x68);Wire.write(r);Wire.write(value);Wire.endTransmission();}
+bool accel(float v[3]) {
+ Wire.beginTransmission(0x68);Wire.write(0x3B);if(Wire.endTransmission(false)!=0)return false;
+ if(Wire.requestFrom(0x68,6)!=6)return false;
+ for(int i=0;i<3;i++){int h=Wire.read(),l=Wire.read();v[i]=(int16_t)((h<<8)|l)/16384.f;}return true;
 }
-static bool mpuReadAccelG(float& g) {
-  Wire.beginTransmission(MPU_ADDR); Wire.write(0x3B);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)6) != 6) return false;
-  int16_t ax = (Wire.read() << 8) | Wire.read();
-  int16_t ay = (Wire.read() << 8) | Wire.read();
-  int16_t az = (Wire.read() << 8) | Wire.read();
-  float x = ax / 16384.0f, y = ay / 16384.0f, z = az / 16384.0f;
-  g = sqrtf(x * x + y * y + z * z);
-  return true;
+void mpuActive(){regWrite(0x6B,0);regWrite(0x6C,7);regWrite(0x1A,3);regWrite(0x1C,0);regWrite(0x38,0);delay(50);}
+void sleepNow() {
+ // Configuration detecteur de mouvement MPU6050 a valider sur le module physique.
+ regWrite(0x6B,0);regWrite(0x1A,1);regWrite(0x1C,1);regWrite(0x1F,20);regWrite(0x20,5);
+ regWrite(0x37,0x20);regWrite(0x38,0x40);
+ Wire.beginTransmission(0x68);Wire.write(0x3A);Wire.endTransmission(false);Wire.requestFrom(0x68,1);if(Wire.available())Wire.read();
+ for(int pin:{LED_R,LED_G,LED_B,MODEM_POWER})gpio_hold_en((gpio_num_t)pin);
+ gpio_deep_sleep_hold_en();
+ esp_sleep_enable_ext0_wakeup((gpio_num_t)MPU_INT,1);
+ // Reessai d'un evenement en attente ; reveil periodique aussi apres inscription echouee.
+ if(pending||!registered)esp_sleep_enable_timer_wakeup(5ULL*60*1000000);
+ esp_deep_sleep_start();
 }
-static void mpuStartContinuous() {
-  mpuWrite(0x6B, 0x00);  // reveil, horloge interne
-  mpuWrite(0x6C, 0x07);  // gyros en veille, accelerometre actif
-  mpuWrite(0x1A, 0x03);  // filtre passe-bas ~44 Hz
-  mpuWrite(0x1C, 0x00);  // +-2 g
-  mpuWrite(0x38, 0x00);  // pas d'interruption
-  delay(50);
+bool sendBody(const char* endpoint,const String& body) {
+ bool ok=false;if(modem.on()&&modem.network()){int status=modem.post(endpoint,body);ok=status>=200&&status<300;}
+ modem.off();return ok;
 }
-static void mpuArmMotionWake() {
-  mpuWrite(0x6B, 0x00);
-  mpuWrite(0x6C, 0x07);
-  mpuWrite(0x1A, 0x01);
-  mpuWrite(0x1C, 0x01);          // HPF 5 Hz, +-2 g
-  mpuWrite(0x1F, MOTION_THR_2MG);
-  mpuWrite(0x20, 1);             // duree
-  mpuWrite(0x69, 0x15);
-  mpuWrite(0x37, 0x20);          // INT actif haut, latch jusqu'a lecture de INT_STATUS
-  mpuWrite(0x38, 0x40);          // interruption mouvement
-  delay(100);
-  mpuRead8(0x3A);                // efface un eventuel flag
-  mpuWrite(0x6B, 0x28);          // mode cycle, temperature coupee
-  mpuWrite(0x6C, 0x47);          // reveil 5 Hz, gyros en veille
+void addAuth(JsonDocument& doc){doc["token"]=DEVICE_TOKEN;doc["device"]=deviceId;}
+void savePending(){prefs.putString("pending",pendingBody);}
+bool retryPending(){
+ if(!pending)return true;
+ if(sendBody("/api/event",String(pendingBody))){pending=false;pendingBody[0]=0;prefs.remove("pending");return true;}
+ return false;
 }
-
-// ---------- GPS ON/OFF via MOSFET P ----------
-static void gpsPower(bool on) {
-  digitalWrite(PIN_GPS_GATE, on ? LOW : HIGH);
-  if (on) Serial1.begin(9600, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
-  else    Serial1.end();
+void queueEvent(bool isParked,const Fix& f,const Zone* z,int64_t arrival) {
+ // Ne jamais ecraser un evenement non livre : reessayer avant de creer le suivant.
+ if(pending&&!retryPending()){led(2);text("ERREUR","Evenement en attente");return;}
+ StaticJsonDocument<640> doc;addAuth(doc);
+ char eid[50];snprintf(eid,sizeof eid,"%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random());
+ doc["event_id"]=eid;doc["state"]=isParked?"PARKED":"DEPART";
+ doc["lat"]=f.lat;doc["lon"]=f.lon;doc["arrival_epoch"]=arrival;doc["zone"]=z?z->name:"TEST";
+ doc["disc"]=nullptr;
+ if(isParked&&z&&z->blue){time_t epoch=arrival;tm lt{};localtime_r(&epoch,&lt);Disc d=discFor(lt.tm_hour,lt.tm_min);
+ char hh[8];snprintf(hh,sizeof hh,"%02d:%02d",d.displayMinutes/60,d.displayMinutes%60);doc["disc"]=hh;text("DISQUE",hh,"Heure d'arrivee");}
+ serializeJson(doc,pendingBody,sizeof pendingBody);pending=true;savePending();
+ bool ok=retryPending();led(ok?(isParked?1:0):2);
+ if(!isParked)text("LIBRE",ok?"Depart recu":"Depart en attente");
 }
-
-struct Fix { bool ok; double lat, lon; int wday, hour, minute; };
-
-static Fix acquireFix() {
-  Fix f = {false, 0, 0, 0, 0, 0};
-  gpsPower(true);
-  unsigned long t0 = millis();
-  while (millis() - t0 < GPS_FIX_TIMEOUT_MS) {
-    while (Serial1.available()) gps.encode(Serial1.read());
-    if (gps.location.isValid() && gps.location.age() < 2000 &&
-        gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
-      f.lat = gps.location.lat(); f.lon = gps.location.lng();
-      int64_t epoch = epochFromUtc(gps.date.year(), gps.date.month(), gps.date.day(),
-                                   gps.time.hour(), gps.time.minute(), gps.time.second());
-      time_t tt = (time_t)epoch;
-      struct tm lt;
-      localtime_r(&tt, &lt);           // TZ Europe/Zurich (setenv dans setup)
-      f.wday = lt.tm_wday; f.hour = lt.tm_hour; f.minute = lt.tm_min;
-      f.ok = true;
-      break;
-    }
-    delay(20);
+String page(const String& message="") {
+ String html="<!doctype html><html lang=fr><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Configuration Parking</title>";
+ html+="<style>body{font:18px sans-serif;max-width:460px;margin:2em auto;padding:1em}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0}</style><h1>Configuration</h1><p>Module : "+deviceId+"</p><p>"+message+"</p>";
+ html+="<p>PoC : utiliser uniquement des identifiants ParkingPay fictifs. Aucune validation ParkingPay ni paiement n'est realise.</p>";
+ html+="<form method=post action=/setup><input type=hidden name=csrf value='"+csrf+"'><label>Identifiant ParkingPay<input name=user maxlength=64 autocomplete=off required></label>";
+ html+="<label>Mot de passe ParkingPay<input type=password name=pass maxlength=64 autocomplete=new-password required></label>";
+ html+="<label><input type=checkbox name=consent value=yes required>J'accepte l'envoi au VPS configure</label><button>Enregistrer</button></form></html>";return html;
+}
+void startPortal() {
+ setupMode=true;led(3);WiFi.mode(WIFI_AP);String ssid="Parking-"+deviceId.substring(deviceId.length()-6);
+ WiFi.softAP(ssid.c_str(),apPassword.c_str(),1,false,1);dns.start(53,"*",WiFi.softAPIP());
+ char nonce[40];snprintf(nonce,sizeof nonce,"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());csrf=nonce;
+ web.on("/",HTTP_GET,[]{web.sendHeader("Cache-Control","no-store");web.send(200,"text/html; charset=utf-8",page());});
+ web.on("/setup",HTTP_POST,[]{
+  if(web.arg("csrf")!=csrf||web.arg("consent")!="yes"){web.send(403,"text/plain","Refuse");return;}
+  String user=web.arg("user"),pw=web.arg("pass");
+  if(user.length()<1||user.length()>64||pw.length()<1||pw.length()>64){web.send(400,"text/plain","1 a 64 caracteres");return;}
+  if(!ALLOW_CREDENTIAL_UPLOAD){web.send(409,"text/html; charset=utf-8",page("Envoi bloque : validation TLS a terminer. Mettre ALLOW_CREDENTIAL_UPLOAD=1 uniquement avec un compte fictif pour tester."));return;}
+  StaticJsonDocument<512> doc;addAuth(doc);doc["pp_user"]=user;doc["pp_pass"]=pw;String body;serializeJson(doc,body);
+  // Pas de stockage des identifiants dans la flash du module.
+  bool ok=sendBody("/api/register",body);body="";pw="";
+  if(ok){prefs.putBool("registered",true);web.send(200,"text/plain","Enregistrement recu par le VPS (pas de validation ParkingPay). Redemarrage.");delay(1000);ESP.restart();}
+  else{led(2);web.send(502,"text/html; charset=utf-8",page("VPS injoignable : rien n'a ete conserve sur le module."));}
+ });
+ web.onNotFound([]{web.sendHeader("Location","http://192.168.4.1/",true);web.send(302,"text/plain","");});web.begin();
+ portalStarted=millis();text(ssid,"Code: "+apPassword,"192.168.4.1",deviceId);
+}
+void setup(){
+ Serial.begin(115200);
+ gpio_deep_sleep_hold_dis();for(int pin:{LED_R,LED_G,LED_B,MODEM_POWER}){gpio_hold_dis((gpio_num_t)pin);pinMode(pin,OUTPUT);}
+ digitalWrite(MODEM_POWER,LOW);led(savedLed);
+ prefs.begin("parking",false);
+ char id[24];snprintf(id,sizeof id,"PK-%012llX",(unsigned long long)(ESP.getEfuseMac()&0xffffffffffffULL));deviceId=id;
+ apPassword=prefs.getString("ap_pw","");if(apPassword.length()<12){char pw[17];snprintf(pw,sizeof pw,"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());apPassword=pw;prefs.putString("ap_pw",apPassword);}
+ registered=prefs.getBool("registered",false);
+ String queued=prefs.getString("pending","");if(queued.length()){snprintf(pendingBody,sizeof pendingBody,"%s",queued.c_str());pending=true;}
+ setenv("TZ","CET-1CEST,M3.5.0,M10.5.0/3",1);tzset();
+ Wire.begin(MPU_SDA,MPU_SCL);mpuActive();
+ SPI.begin(EPD_SCK,-1,EPD_MOSI,EPD_CS);screen.init(0,true,2,false);
+ pinMode(0,INPUT_PULLUP);bool resetRequested=true;
+ // BOOT maintenu 3 s au demarrage apres sortie du bootloader : retour au setup.
+ for(int i=0;i<30;i++){if(digitalRead(0)!=LOW){resetRequested=false;break;}delay(100);}
+ if(resetRequested){prefs.putBool("registered",false);registered=false;}
+ if(!registered){startPortal();return;}
+ if(pending){bool ok=retryPending();led(ok?(parked?1:0):2);}
+ // Un reveil timer ne signifie jamais un depart.
+ if(parked&&esp_sleep_get_wakeup_cause()==ESP_SLEEP_WAKEUP_TIMER)sleepNow();
+ if(parked){
+  float a[3],b[3];int changes=0;if(accel(a))for(int i=0;i<100;i++){delay(50);if(accel(b)){float d=0;for(int k=0;k<3;k++){d+=fabs(b[k]-a[k]);a[k]=b[k];}if(d>0.06)changes++;}}
+  if(changes<15)sleepNow();
+  Fix f;f.valid=true;f.lat=lastLat;f.lon=lastLon;queueEvent(false,f,nullptr,0);parked=false;
+ }
+}
+void loop(){
+ if(setupMode){dns.processNextRequest();web.handleClient();if(millis()-portalStarted>900000){web.stop();dns.stop();WiFi.mode(WIFI_OFF);sleepNow();}delay(5);return;}
+ static bool initialized=false,checked=false;static float previous[3];static uint32_t since=0;
+ float a[3];if(!accel(a)){led(2);delay(100);return;}
+ if(!initialized){for(int k=0;k<3;k++)previous[k]=a[k];initialized=true;since=millis();}
+ float delta=0;for(int k=0;k<3;k++){delta+=fabs(a[k]-previous[k]);previous[k]=a[k];}
+ if(delta>0.06){since=millis();checked=false;}
+ if(!checked&&millis()-since>=15000){
+  checked=true;uint32_t checkTime=millis();Fix f;if(modem.on())f=modem.gps();modem.off();
+  if(!f.valid){led(2);return;}
+  // Estime l'heure du debut de l'arret, pas celle de l'obtention tardive du fix.
+  int64_t arrival=f.epoch-(millis()-since)/1000;
+  (void)checkTime;const Zone* zone=locate(f);
+  if(zone||TEST_ANY_ZONE){
+   static const Zone test={0,0,0,0,"TEST",true};if(!zone)zone=&test;
+   queueEvent(true,f,zone,arrival);parked=true;lastLat=f.lat;lastLon=f.lon;
+   delay(10000);sleepNow();
   }
-  gpsPower(false);
-  return f;
-}
-
-static bool inZone(double lat, double lon) {
-#if DEBUG_ANY_POSITION_IS_ZONE
-  (void)lat; (void)lon;
-  return true;
-#else
-  for (int i = 0; i < N_ZONES; i++)
-    if (inRect(lat, lon, ZONES[i].latMin, ZONES[i].latMax, ZONES[i].lonMin, ZONES[i].lonMax)) return true;
-  return false;
-#endif
-}
-
-// ---------- Ecran ----------
-static void fmtHM(char* out, int minutes) {
-  minutes %= 1440;
-  sprintf(out, "%02d:%02d", minutes / 60, minutes % 60);
-}
-static void drawCentered(const char* s, int y, const GFXfont* font) {
-  int16_t x1, y1; uint16_t w, h;
-  display.setFont(font);
-  display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((display.width() - w) / 2 - x1, y);
-  display.print(s);
-}
-static void showDisc(const Disc& d) {
-  char a[16], b[40];
-  display.setRotation(1);
-  display.setFullWindow();
-  display.firstPage();
-  do {
-    display.fillScreen(GxEPD_WHITE);
-    display.setTextColor(GxEPD_BLACK);
-    display.drawRect(0, 0, display.width(), display.height(), GxEPD_BLACK);
-    if (d.needed) {
-      fmtHM(a, d.discMin);
-      drawCentered("DISQUE", 22, &FreeMonoBold12pt7b);
-      drawCentered(a, 72, &FreeMonoBold24pt7b);
-      char dep[8]; fmtHM(dep, d.departMin);
-      snprintf(b, sizeof(b), "Depart max %s%s", dep, d.nextDay ? " (+1j)" : "");
-      drawCentered(b, 108, &FreeMono9pt7b);
-    } else {
-      drawCentered("PAS DE DISQUE", 50, &FreeMonoBold12pt7b);
-      drawCentered("(hors horaire / dimanche)", 90, &FreeMono9pt7b);
-    }
-  } while (display.nextPage());
-  display.hibernate();
-}
-static void showMessage(const char* l1, const char* l2) {
-  display.setRotation(1);
-  display.setFullWindow();
-  display.firstPage();
-  do {
-    display.fillScreen(GxEPD_WHITE);
-    display.setTextColor(GxEPD_BLACK);
-    drawCentered(l1, 55, &FreeMonoBold12pt7b);
-    drawCentered(l2, 95, &FreeMono9pt7b);
-  } while (display.nextPage());
-  display.hibernate();
-}
-
-// ---------- LoRaWAN ----------
-static bool loraSend(const uint8_t* payload, size_t len) {
-  radioSPI.begin(PIN_RADIO_SCK, PIN_RADIO_MISO, PIN_RADIO_MOSI, PIN_RADIO_CS);
-  pinMode(PIN_RADIO_POW, OUTPUT);
-  digitalWrite(PIN_RADIO_POW, HIGH);
-  int16_t st = radio.begin();
-  if (st != RADIOLIB_ERR_NONE) { Serial.printf("radio.begin: %d\n", st); return false; }
-  radio.setDio2AsRfSwitch(true);
-  for (int attempt = 0; attempt < LORA_TX_RETRIES; attempt++) {
-    node.beginOTAA(JOIN_EUI, DEV_EUI, NWK_KEY, APP_KEY);
-    st = node.activateOTAA();
-    if (st == RADIOLIB_LORAWAN_NEW_SESSION || st == RADIOLIB_LORAWAN_SESSION_RESTORED) {
-      st = node.sendReceive(payload, len, 1);
-      Serial.printf("sendReceive: %d\n", st);
-      if (st >= 0) { radio.sleep(); return true; }
-    } else {
-      Serial.printf("join: %d\n", st);
-    }
-    delay(10000);
-  }
-  radio.sleep();
-  return false;
-}
-
-// ---------- Mouvement ----------
-static bool confirmRealMovement() {   // ~5 s d'echantillonnage apres un reveil
-  mpuStartContinuous();
-  float prev = 0, g; int moving = 0;
-  mpuReadAccelG(prev);
-  for (int i = 0; i < 100; i++) {
-    delay(50);
-    if (mpuReadAccelG(g)) { if (fabsf(g - prev) > STILL_DELTA_G) moving++; prev = g; }
-  }
-  return moving >= 20;
-}
-
-static void sleepArmed() {
-  mpuArmMotionWake();
-  digitalWrite(PIN_GPS_GATE, HIGH);
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_MPU_INT, 1);
-  Serial.flush();
-  esp_deep_sleep_start();
-}
-
-static void doPark(const Fix& f) {
-  Disc d = computeDisc(f.wday, f.hour, f.minute);
-  uint8_t pl[11];
-  int n = encodePayload(pl, 1, f.lat, f.lon, d);
-  bool sent = loraSend(pl, n);
-  showDisc(d);
-  Serial.printf("PARK lat=%.5f lon=%.5f disc=%d lora=%d\n", f.lat, f.lon, d.discMin, sent);
-  rtcState = PARKED; rtcLat = f.lat; rtcLon = f.lon;
-  delay(ARM_DELAY_MS);
-  sleepArmed();
-}
-
-static void doDepart() {
-  Disc none = {false, 0, 0, false};
-  uint8_t pl[11];
-  int n = encodePayload(pl, 0, rtcLat, rtcLon, none);
-  bool sent = loraSend(pl, n);
-  Serial.printf("DEPART lora=%d\n", sent);
-  showMessage("LIBRE", "depart envoye");
-  rtcState = MOVING;
-}
-
-// ---------- Programme ----------
-void setup() {
-  Serial.begin(115200);
-  pinMode(PIN_GPS_GATE, OUTPUT);
-  digitalWrite(PIN_GPS_GATE, HIGH);              // GPS OFF
-  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1); // Europe/Zurich
-  tzset();
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  epdSPI.begin(PIN_EPD_SCK, -1, PIN_EPD_MOSI, PIN_EPD_CS);
-  display.epd2.selectSPI(epdSPI, SPISettings(4000000, MSBFIRST, SPI_MODE0));
-  display.init(115200, true, 2, false);
-
-  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  if (cause == ESP_SLEEP_WAKEUP_EXT0 && rtcState == PARKED) {
-    if (confirmRealMovement()) doDepart();
-    else sleepArmed();                            // porte, vent... : on se rendort
-  }
-  mpuStartContinuous();
-}
-
-void loop() {
-  static unsigned long stillSince = 0, checkedAt = 0;
-  static bool checkedThisStop = false;
-  static float prev = 0;
-  float g;
-  if (!mpuReadAccelG(g)) { delay(100); return; }
-  bool moving = fabsf(g - prev) > STILL_DELTA_G;
-  prev = g;
-  unsigned long now = millis();
-  if (moving) { stillSince = 0; checkedThisStop = false; }
-  else if (stillSince == 0) stillSince = now;
-
-  if (!checkedThisStop && stillSince && now - stillSince >= STILL_SECONDS * 1000UL) {
-    Fix f = acquireFix();
-    checkedThisStop = true; checkedAt = millis();
-    if (f.ok && inZone(f.lat, f.lon)) doPark(f);
-    Serial.println(f.ok ? "hors zone" : "pas de fix");
-  }
-  if (checkedThisStop && !moving && millis() - checkedAt > IDLE_SLEEP_MS) sleepArmed();
-  delay(50);   // ~20 Hz
+ }
+ // Hors zone : pas de nouvelle verification tant qu'un nouveau mouvement n'est pas detecte.
+ if(checked&&millis()-since>180000)sleepNow();
+ delay(50);
 }

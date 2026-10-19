@@ -1,0 +1,17 @@
+[Unit]
+Description=Parking PoC API
+After=network.target
+[Service]
+DynamicUser=yes
+StateDirectory=parking
+EnvironmentFile=/etc/parking/parking.env
+Environment=DB_PATH=/var/lib/parking/parking.db
+ExecStart=/usr/bin/python3 /opt/parking/server.py
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+[Install]
+WantedBy=multi-user.target
